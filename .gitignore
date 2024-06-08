@@ -1,0 +1,10 @@
+*
+
+!.gitignore
+!bot_commands.py
+!context_config
+!context.py
+!discord_client.py
+!llama_api.py
+!main.py
+!setup_logging.py
