@@ -3,7 +3,6 @@ import discord
 from discord.ext import commands
 from setup_logging import setup_logging
 import bot_commands
-from context import Context
 from llama_api import LlamaAPI
 from context_config import ContextConfig
 import pytesseract
@@ -85,6 +84,7 @@ class DiscordClient(commands.Bot):
             self.logger.debug("Message starts with prompt prefix, processing prompt")
             prompt = message.content.strip()[len(self.prompt_prefix):].strip()
             image_files = await self.get_image_files(message)
+
             cleaned_prompt = [prompt, message, image_files, "prompt"]
             await self.message_queue.put(cleaned_prompt)
             await message.channel.send("Prompt received and queued for processing!")
@@ -120,13 +120,11 @@ class DiscordClient(commands.Bot):
 
                 if image_files:
                     self.logger.debug("Message contains image files, processing images")
-                    if not self.multimodal_api.is_running and not self.multimodal_api.in_startup:
-                        self.logger.debug("Multimodal API is not running, starting API")
-                        await self.multimodal_api.start_api()
-                    multimodal_response = await self.process_image_files(image_files, cleaned_prompt)
+                    response = await self.llama_api.send_request(self.context_config.get_setting('multimodal_context'), cleaned_prompt, image_files=image_files)
+                else:
+                    response = await self.llama_api.send_request(self.context_config.get_setting('main_context'), cleaned_prompt, image_files=[])
 
-                response = await self.llama_api.send_request(self.context_config.get_setting('main_context') + multimodal_response, cleaned_prompt, image_files=[])
-                self.logger.debug(f"Llama API response: {response}")
+                self.logger.debug(f"Llama API response: {self.truncate_log(response)}")
                 if message_type == "simulate":
                     await self.handle_simulate_response(response, queued_message[1], queued_message[4], queued_message[5], queued_message[6], queued_message[7])
                 else:
@@ -187,10 +185,16 @@ class DiscordClient(commands.Bot):
         # Send response message, handle large messages
         self.logger.debug(f"Sending response message: {response}")
         response_clean = response.strip().replace('\n', ' ').replace('\r', ' ')
-        if len(response_clean) <= 1950:
-            await message.channel.send(response_clean)
-        else:
-            await self.send_large_message(response_clean, message.channel)
+        try:
+            if len(response_clean) <= 1950:
+                await message.channel.send(response_clean)
+            else:
+                await self.send_large_message(response_clean, message.channel)
+        except discord.errors.HTTPException as e:
+            if e.code == 50006:  # Cannot send an empty message
+                await message.channel.send("Got an empty response from the model, please try again!")
+            else:
+                self.logger.error(f"Failed to send message: {e}")
 
     async def send_large_message(self, content, channel, chunk_size=1900):
         # Send large messages in chunks
@@ -265,3 +269,8 @@ class DiscordClient(commands.Bot):
                 self.logger.debug("Clearing message queue and restarting message processing loop")
                 self.message_queue = asyncio.Queue()
                 await asyncio.sleep(1)  # Small delay to avoid tight loop in case of repeated failures
+
+    def truncate_log(self, log_message, max_length=1000):
+        if len(log_message) > max_length:
+            return log_message[:max_length] + '... [truncated]'
+        return log_message

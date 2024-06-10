@@ -22,6 +22,7 @@ class Configurable:
             raise ValueError(f"Model '{model_name}' is not recognized. Available models are: {list(self.models.keys())}")
 
         self.config = self.models[model_name].copy()
+        self.config['_model_name'] = model_name  # Store model_name with a leading underscore to avoid it being used as a command-line argument
 
         for key, value in kwargs.items():
             self.config[key] = value
@@ -43,10 +44,11 @@ class Configurable:
 
     def apply_defaults(self):
         for key in list(self.config):
-            if key not in self.models[self.config['model_name']]:
+            if key not in self.models[self.config['_model_name']]:
                 delattr(self, key)
                 del self.config[key]
-        self.initialize_model_config(model_name=self.config['model_name'])
+        self.initialize_model_config(model_name=self.config['_model_name'])
+
 
 class LlamaAPI:
     def __init__(self, **kwargs):
@@ -70,7 +72,7 @@ class LlamaAPI:
 
         cli_args = ["/bin/bash", self.configurable.model_executable]
         for key, value in self.configurable.config.items():
-            if key not in ['model_executable']:
+            if key not in ['model_executable', '_model_name']:  # Exclude '_model_name' from the command line arguments
                 if isinstance(value, bool) and value:
                     cli_args.append(f"--{key}")
                 elif not isinstance(value, bool):
@@ -94,11 +96,22 @@ class LlamaAPI:
             self.logger.error(f"Failed to start the API process: {e}")
             self.in_startup = False
 
+    async def switch_model(self, model_name):
+        if model_name != self.configurable.config['_model_name']:
+            self.configurable.initialize_model_config(model_name=model_name)
+            await self.stop_api()
+            await self.start_api()
+
     async def send_request(self, context, prompt, image_files=[], history=None):
+        if image_files:
+            await self.switch_model('llava-v1.5-7b')
+        else:
+            await self.switch_model('Llama3-70B-Instruct')
+
         await self.api_ready.wait()
         prompt_text = self.construct_prompt(context, prompt, history)
         payload = self.construct_payload(prompt_text, image_files)
-        self.logger.debug(f"Constructed payload: {json.dumps(payload, indent=2)}")
+        self.logger.debug(f"Constructed payload: {self.truncate_log(json.dumps(payload, indent=2))}")
 
         headers = {'Accept': 'text/event-stream', 'Content-Type': 'application/json'}
         url = f"{self.base_url}/completion"
@@ -213,3 +226,8 @@ class LlamaAPI:
             self.logger.info("API process stopped")
         else:
             self.logger.debug("API process is not running")
+
+    def truncate_log(self, log_message, max_length=1000):
+        if len(log_message) > max_length:
+            return log_message[:max_length] + '... [truncated]'
+        return log_message
