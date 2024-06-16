@@ -5,9 +5,7 @@ from setup_logging import setup_logging
 import bot_commands
 from llama_api import LlamaAPI
 from context_config import ContextConfig
-import pytesseract
-from PIL import Image
-from io import BytesIO
+from context import Context  # Ensure this import is correct based on your project structure
 
 class DiscordClient(commands.Bot):
     def __init__(self, llama_api, prompt_prefix=':', command_prefix='!', intent_discord=None, debug_bot_commands=True, log_all_messages=True):
@@ -46,6 +44,9 @@ class DiscordClient(commands.Bot):
         
         # Load commands
         self.load_commands()
+        
+        # Initialize the Context class for URL handling
+        self.context = Context()
 
     async def setup_hook(self):
         # Start processing messages
@@ -67,7 +68,21 @@ class DiscordClient(commands.Bot):
 
     async def on_message(self, message):
         self.logger.debug(f"Received message: {message.content} from {message.author}")
-
+        # Detect URLs in the message content
+        urls = self.context.find_urls(message.content)
+        self.logger.debug(f"URLs: {urls}")
+        if urls:
+            for url_details in urls:
+                if 'justpaste.it' in message.content:
+                    self.logger.debug(f"justpaste.it URL found: {url_details.full_url}")
+                    content = await self.context.fetch_justpasteit_content(url_details.full_url)
+                    if content:
+                        new_content = message.content.replace(url_details.full_url, content)
+                        message.content = f":{new_content}"
+                    else:
+                        await message.channel.send("Failed to fetch content from justpaste.it.")
+        else:
+            self.logger.debug("No URLs found in the message content.")
         # Ignore the bot's own messages unless they are in a conversation channel
         if message.author == self.user and message.channel.id not in self.conversation_channels:
             self.logger.debug("Message is from the bot and not in a conversation channel, ignoring")
@@ -89,6 +104,8 @@ class DiscordClient(commands.Bot):
             await self.message_queue.put(cleaned_prompt)
             await message.channel.send("Prompt received and queued for processing!")
             self.logger.debug(f"Queued prompt for processing: {cleaned_prompt}")
+            return
+
 
     async def get_image_files(self, message):
         # Extract image files from the message
@@ -108,28 +125,39 @@ class DiscordClient(commands.Bot):
         try:
             while True:
                 queued_message = await self.message_queue.get()
-                cleaned_prompt = queued_message[0]
-                image_files = queued_message[2]
-                message_type = queued_message[3]
-                multimodal_response = ""
+                message_type = queued_message[0]
 
-                self.logger.debug(f"Processing queued message: {queued_message}")
-                if not self.llama_api.is_running and not self.llama_api.in_startup:
-                    self.logger.debug("Llama API is not running, starting API")
-                    await self.llama_api.start_api()
-
-                if image_files:
-                    self.logger.debug("Message contains image files, processing images")
-                    response = await self.llama_api.send_request(self.context_config.get_setting('multimodal_context'), cleaned_prompt, image_files=image_files)
+                if message_type == "justpasteit":
+                    url = queued_message[1]
+                    message = queued_message[2]
+                    content = await self.context.fetch_justpasteit_content(url)
+                    if content:
+                        await message.channel.send(f"Fetched content from justpaste.it:\n{content}")
+                    else:
+                        await message.channel.send("Failed to fetch content from justpaste.it.")
                 else:
-                    response = await self.llama_api.send_request(self.context_config.get_setting('main_context'), cleaned_prompt, image_files=[])
+                    cleaned_prompt = queued_message[0]
+                    image_files = queued_message[2]
+                    message_type = queued_message[3]
+                    multimodal_response = ""
 
-                self.logger.debug(f"Llama API response: {self.truncate_log(response)}")
-                if message_type == "simulate":
-                    await self.handle_simulate_response(response, queued_message[1], queued_message[4], queued_message[5], queued_message[6], queued_message[7])
-                else:
-                    await self.send_response_message(response, queued_message[1])
-                self.message_queue.task_done()
+                    self.logger.debug(f"Processing queued message: {queued_message}")
+                    if not self.llama_api.is_running and not self.llama_api.in_startup:
+                        self.logger.debug("Llama API is not running, starting API")
+                        await self.llama_api.start_api()
+
+                    if image_files:
+                        self.logger.debug("Message contains image files, processing images")
+                        response = await self.llama_api.send_request(self.context_config.get_setting('multimodal_context'), cleaned_prompt, image_files=image_files)
+                    else:
+                        response = await self.llama_api.send_request(self.context_config.get_setting('main_context'), cleaned_prompt, image_files=[])
+
+                    self.logger.debug(f"Llama API response: {self.truncate_log(response)}")
+                    if message_type == "simulate":
+                        await self.handle_simulate_response(response, queued_message[1], queued_message[4], queued_message[5], queued_message[6], queued_message[7])
+                    else:
+                        await self.send_response_message(response, queued_message[1])
+                    self.message_queue.task_done()
         except Exception as e:
             self.logger.error(f"Error in process_messages loop: {e}")
             self.logger.debug("Restarting process_messages loop")
@@ -154,7 +182,7 @@ class DiscordClient(commands.Bot):
 
             response_clean = self.clean_response(response, current_name)
             if not response_clean:
-                self.logger.debug(f"No response received for {current_name}, retrying")
+                self.logger.debug(f"No response received for {current_name, retrying}")
                 time.sleep(1)
                 response_clean = self.clean_response(await self.llama_api.send_request(self.context_config.get_setting('main_context'), prompt), current_name)
 
